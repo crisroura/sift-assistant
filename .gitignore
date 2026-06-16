@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Local env / secrets (tools.env is intentional config — paths only — keep it tracked)
+*.env.local
+secrets/
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Python
+__pycache__/
+*.pyc

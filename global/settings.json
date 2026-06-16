@@ -1,0 +1,95 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read",
+      "Write(./analysis/*)",
+      "Write(./reports/*)",
+      "Write(./context/*)",
+      "Edit(./analysis/*)",
+      "Edit(./reports/*)",
+      "Edit(./context/*)"
+    ],
+    "defaultMode": "acceptEdits",
+    "ask": [],
+    "deny": [
+      "Read(./secrets/**)",
+      "Read(./**/*.key)",
+      "Read(./**/*.pem)",
+
+      "Write(./sources/**)",
+      "Write(/cases/**/sources/**)",
+      "Edit(./sources/**)",
+      "Edit(/cases/**/sources/**)",
+
+      "Write(./export/**)",
+      "Write(/cases/**/export/**)",
+      "Edit(./export/**)",
+      "Edit(/cases/**/export/**)",
+
+      "Write(./audit/**)",
+      "Edit(./audit/**)",
+      "Write(/cases/**/audit/**)",
+      "Edit(/cases/**/audit/**)",
+
+      "Bash(rm -rf:*)",
+      "Bash(rm -fr:*)",
+      "Bash(rm -r:*)",
+      "Bash(rm --recursive:*)",
+      "Bash(shred:*)",
+      "Bash(truncate:*)",
+      "Bash(mkfs:*)",
+      "Bash(wipefs:*)",
+      "Bash(fdisk:*)",
+      "Bash(parted:*)",
+      "Bash(sgdisk:*)",
+      "Bash(dd:*)",
+
+      "Bash(wget:*)",
+      "Bash(curl:*)",
+      "Bash(ssh:*)",
+      "Bash(scp:*)",
+      "Bash(rsync:*)",
+      "Bash(nc:*)",
+      "Bash(ncat:*)",
+      "Bash(netcat:*)",
+      "Bash(telnet:*)",
+      "Bash(ftp:*)",
+      "WebFetch"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/evidence_guard.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ~/.claude/action_logger.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import sys,json,os,datetime; d=json.load(sys.stdin); os.makedirs('./audit',exist_ok=True); ts=datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'); open('./audit/forensic_audit.log','a').write(ts+' | session='+d.get('session_id','')+' | cwd='+d.get('cwd','')+' | transcript='+d.get('transcript_path','')+'\\n')\""
+          }
+        ]
+      }
+    ]
+  }
+}
