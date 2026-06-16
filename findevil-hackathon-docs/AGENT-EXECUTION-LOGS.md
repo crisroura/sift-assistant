@@ -23,37 +23,39 @@ SIFT Assistant is a **hybrid** of all three shapes, so these logs cover all thre
 | Hackathon dimension | What it means here | Log file |
 |---|---|---|
 | **Single-agent** | Every tool call with UTC timestamp, active skill/phase, outcome, duration, and token usage | `tool-executions.jsonl` |
-| **Multi-agent** | The orchestrator spawns per-asset analysis subagents; their prompts and returns are logged as agent-to-agent messages | `agent-messages.jsonl` |
-| **Persistent-loop** | The agent iterates Parse → Analyze → Correlate → Report, re-entering Parse once per artifact/asset; each pass is traced | `phase-iterations.jsonl`, `phase-timeline.md` |
+| **Multi-agent** | The orchestrator spawns per-asset subagents for Parse and Analyze; their prompts and returns are logged as agent-to-agent messages | `agent-messages.jsonl` |
+| **Persistent-loop** | The agent iterates Parse → Analyze → Correlate → Report → Verify; each pass is traced | `phase-iterations.jsonl`, `phase-timeline.md` |
 | **Finding → tool traceability** | Every typed finding resolved through its evidence tag to the producing tool execution | `finding-trace.json` |
 | **Run totals** | Tool counts, token totals (overall + per phase), findings, trace coverage | `session-summary.json` |
 
 ## The agent architecture these logs describe
 
-SIFT Assistant is a **single orchestrator that fans out to subagents across phase iterations** — not a
-flat single agent, and not a swarm. The orchestrator runs the four-phase pipeline; during Analyze it
-spawns one general-purpose **subagent per asset** (each does its own tool sequence in an isolated
-context and returns a report); Parse re-enters once per artifact/asset. The extracted logs make each of
-those three structures explicit and time-ordered.
+SIFT Assistant is a **single orchestrator that fans out to per-asset subagents across phase iterations** —
+not a flat single agent, and not a swarm. The orchestrator runs the pipeline; during **Parse** it spawns
+one subagent per asset to run that asset's parsers in an isolated context, and during **Analyze** it
+spawns one subagent per asset to build that asset's report. Each subagent returns its result to the
+orchestrator, which then correlates and reports. The extracted logs make each of those structures
+explicit and time-ordered.
 
 Phase attribution is exact, not inferred: each Claude Code transcript line carries an `attributionSkill`
-field naming the active skill (`dfir-evtx`, `case-analyze`, `case-correlate`, …), which the extractor
-folds into pipeline phases (`parse`, `analyze`, `correlate`, `report`, `verify`, plus `setup`/`mount`).
+field naming the active skill (`case-parse`, `case-analyze`, `case-correlate`, …), folded into pipeline
+phases. Subagent tool calls inherit the phase of the orchestrator step that spawned them, so a parser run
+inside a Parse subagent is correctly labeled `parse`.
 
-## Featured example: CLIENT-IR-2026-007
+## Featured run: CLIENT-IR-2026-008
 
-The committed logs under [`logs/CLIENT-IR-2026-007/`](../logs/CLIENT-IR-2026-007/) were generated from a
-real two-asset run (`dc01` domain controller, `rd01` RDS host):
+The committed logs under [`logs/CLIENT-IR-2026-008/`](../logs/CLIENT-IR-2026-008/) were generated from a
+real, continuous two-asset investigation (`dc01` domain controller, `rd01` RDS host) — the same run shown
+in the demo video:
 
-- **708 tool executions** across **3 agent contexts** (the orchestrator + 2 analysis subagents)
-- **35,750,187 tokens** total (221,164 input / 585,943 output / 32.7M cache-read / 2.24M cache-creation)
-- **33 phase passes**, **25 typed findings** (17 high / 5 medium / 3 low confidence)
-- **46 evidence items** in the registry, cited **66 times** across findings — **100% trace coverage**
+- **321 tool executions** across **5 agent contexts** — the orchestrator plus 4 subagents: *Parse dc01*,
+  *Parse rd01*, *Analyze dc01*, *Analyze rd01*
+- **33,973,667 tokens** total (54,672 input / 231,164 output / 32.3M cache-read / 1.41M cache-creation)
+- **8 phase passes** — a clean Setup → Mount → Parse → Analyze → Correlate → Report → Verify sequence
+- **22 typed findings** (12 high / 6 medium / 4 low confidence)
+- **56 evidence items** in the registry, cited **70 times** across findings — **100% trace coverage**
   (every citation resolves to a producing tool execution)
-
-> The example case was assembled over several working sessions across three calendar days, so its
-> wall-clock span is wide; a clean re-run is one continuous pipeline. The extractor is deterministic and
-> idempotent — re-run it after your fresh case run to regenerate every file (see *Regenerating*).
+- end-to-end wall-clock of **~78 minutes** (2026-06-15T23:41Z → 2026-06-16T00:59Z)
 
 ## Log file reference
 
@@ -65,18 +67,18 @@ tool outputs are truncated to a head+tail snippet with a `bytes_total` marker (n
 
 ```json
 {
-  "ts": "2026-06-14T22:04:12.141Z",
-  "agent": "main",
-  "session": "e3e77641-3abe-4fcb-a32b-2f7f0e5459be",
-  "skill": "dfir-evtx",
+  "ts": "2026-06-15T23:53:21.906Z",
+  "agent": "subagent:Parse dc01 artifacts",
+  "session": "…",
+  "skill": "case-parse",
   "phase": "parse",
   "tool": "Bash",
   "tool_use_id": "toolu_…",
-  "target": "source ~/.claude/tools.env\n$EZEVTXECMD -d \"./sources/dc01/…/Logs/\" --csv \"./export/dc01/…/evtx/\" …",
+  "target": "… MFTECmd.dll -f \"$SRC/$MFT\" --csv \"export/dc01/…/mft/\" --csvf \"dc01-…-mft-mftecmd.csv\" …",
   "outcome": "ok",
-  "duration_ms": 52,
-  "tokens": { "input": 2, "output": 323, "cache_read": 27999, "cache_creation": 820 },
-  "seq": 261
+  "duration_ms": 12586,
+  "tokens": { "input": 2, "output": 1, "cache_read": 88751, "cache_creation": 2675 },
+  "seq": 68
 }
 ```
 
@@ -84,26 +86,44 @@ tool outputs are truncated to a head+tail snippet with a `bytes_total` marker (n
 
 The orchestrator-to-subagent communication, time-ordered. A `spawn` message carries the full task prompt;
 the matching `result` message carries the subagent's returned report plus its own tool-call counts and
-token total. `Skill` invocations are logged as orchestrator-to-skill control messages.
+token total. `Skill` invocations are logged as orchestrator-to-skill control messages, so the full
+control flow is visible:
 
-```json
-{ "ts": "2026-06-15T22:15:54.772Z", "channel": "agent-to-agent", "kind": "spawn",
-  "from": "main", "to": "subagent:Analyze rd01 asset", "subagent_type": "general-purpose",
-  "prompt": { "bytes_total": 10696, "truncated": true, "text": "…" } }
-{ "ts": "2026-06-15T22:35:…Z", "channel": "agent-to-agent", "kind": "result",
-  "from": "subagent:Analyze rd01 asset", "to": "main",
-  "subagent_tool_calls": { "Bash": 33, "Write": 1 }, "subagent_tokens_total": 2922513,
-  "result": { "bytes_total": …, "text": "…" } }
+```
+invoke  skill:case-investigate
+invoke  skill:case-parse
+spawn   main → subagent:Parse dc01 artifacts
+spawn   main → subagent:Parse rd01 artifacts
+result  subagent:Parse dc01 artifacts → main   (Bash×49, Read×12)
+result  subagent:Parse rd01 artifacts → main   (Bash×82, Read×16, Write×1)
+invoke  skill:case-analyze
+spawn   main → subagent:Analyze rd01
+spawn   main → subagent:Analyze dc01
+result  subagent:Analyze rd01 → main           (Bash×47, Write×1)
+result  subagent:Analyze dc01 → main           (Bash×47, Write×1)
+invoke  skill:case-correlate
+invoke  skill:case-report
+invoke  skill:case-evidence-verify
 ```
 
 ### `phase-iterations.jsonl` + `phase-timeline.md` — the persistent-loop view
 
-One record per contiguous **phase pass**. Because the agent re-enters Parse once per artifact/asset, the
-iteration structure is visible: in the example, Parse appears as **multiple passes** before the pipeline
-advances to Analyze. Each record gives the time window, tool counts by type, tokens spent, the agent
-contexts involved, assets touched, and a sample of outputs written.
-[`phase-timeline.md`](../logs/CLIENT-IR-2026-007/phase-timeline.md) renders the same data as a table plus
-a pass-by-pass "what changed" narrative.
+One record per contiguous **phase pass**, giving the time window, tool counts by type, tokens spent, the
+agent contexts involved, assets touched, and a sample of outputs written. For this run the passes are:
+
+| # | Phase | Tools | Agents |
+|---|-------|-------|--------|
+| 1 | Setup | 8 | main |
+| 2 | Mount | 2 | main |
+| 3 | Orchestration | 9 | main |
+| 4 | **Parse** | 177 | main, ↳Parse dc01, ↳Parse rd01 |
+| 5 | **Analyze** | 105 | main, ↳Analyze dc01, ↳Analyze rd01 |
+| 6 | Correlate | 12 | main |
+| 7 | Report | 4 | main |
+| 8 | Evidence Verify | 4 | main |
+
+[`phase-timeline.md`](../logs/CLIENT-IR-2026-008/phase-timeline.md) renders the same data with a
+pass-by-pass "what changed" narrative.
 
 ### `finding-trace.json` — the traceability artifact
 
@@ -115,41 +135,43 @@ cannot be matched is listed explicitly rather than hidden (honest gaps, never fa
 
 ## Worked example: trace a finding to its tool execution
 
-This is the exact chain a judge follows for **finding `FD-dc01-00001`** (high confidence, *execution*):
+This is the exact chain a judge follows for **finding `FD-dc01-00001`** (high confidence, *exfiltration*) —
+the headline "evil" in this case:
 
-> **Finding.** "Windows Defender detected PowerSploit (`Trojan:PowerShell/Powersploit.O`) in
-> `C:\Users\spsql\n.ps1` on the DC on 2018-08-31; offensive PowerShell tooling staged under the spsql
-> service-account profile."
+> **Finding.** "`shieldbase\spsql` extracted the Active Directory database (NTDS.dit + SYSTEM/SECURITY
+> hives) twice via `ntdsutil ifm` on 2018-09-05, preceded by `vssadmin` shadow-copy creation. Full domain
+> credential database compromised."
 
-1. **Finding → evidence tag.** `FD-dc01-00001`'s provenance cites `EV-dc01-00001`.
-2. **Evidence tag → file + locator.** The evidence registry resolves `EV-dc01-00001` to
-   `export/dc01/mnt-001-base-dc-cdrive/evtx/dc01-mnt-001-base-dc-cdrive-evtx-evtxecmd.csv`, locator
-   *"EventId 1116/1117 Defender; Threat Trojan:PowerShell/Powersploit.O; file C:\Users\spsql\n.ps1; csv
-   rows 2430698-2430701."*
-3. **File → producing tool execution.** That CSV was written by **`seq` 261** — a `Bash` call under skill
-   `dfir-evtx`, phase `parse`, at `2026-06-14T22:04:12.141Z`:
+1. **Finding → evidence tag.** `FD-dc01-00001`'s provenance cites `EV-dc01-00009`.
+2. **Evidence tag → file + locator.** The evidence registry resolves `EV-dc01-00009` to
+   `export/dc01/mnt-001-base-dc-cdrive/mft/dc01-mnt-001-base-dc-cdrive-mft-mftecmd.csv`, locator
+   *"EntryNumber 132817; .\temp\Active Directory\ntds.dit + ntds.jfm + .\temp\registry\SYSTEM,SECURITY;
+   Created 2018-09-05 12:16:54."*
+3. **File → producing tool execution.** That CSV was written by **`seq` 68** — a `Bash` call run by the
+   **`Parse dc01 artifacts` subagent** under skill `case-parse`, phase `parse`, at
+   `2026-06-15T23:53:21.906Z` (`outcome: ok`, `duration_ms: 12586`):
    ```
-   source ~/.claude/tools.env
-   $EZEVTXECMD \
-     -d "./sources/dc01/mnt-001-base-dc-cdrive/Windows/System32/winevt/Logs/" \
-     --csv "./export/dc01/mnt-001-base-dc-cdrive/evtx/" \
-     --csvf "dc01-mnt-001-base-dc-cdrive-evtx-evtxecmd.csv" \
-     --maps $EZEVTXECMD_MAPS …
+   EZ="dotnet /opt/zimmermantools/MFTECmd.dll"
+   SRC="./sources/dc01/mnt-001-base-dc-cdrive"
+   OUT="export/dc01/mnt-001-base-dc-cdrive/mft"
+   $EZ -f "$SRC/\$MFT" --csv "$OUT/" --csvf "dc01-mnt-001-base-dc-cdrive-mft-mftecmd.csv"
    ```
-4. **Cross-check.** Look up `seq` 261 in `tool-executions.jsonl` for the full row — outcome `ok`,
-   `duration_ms` 52, and the token usage of that turn. The finding is now grounded in a specific,
-   timestamped tool execution that any reviewer can re-run against the same evidence.
+4. **Cross-check.** Look up `seq` 68 in `tool-executions.jsonl` for the full row, including the turn's
+   token usage. The finding is now grounded in a specific, timestamped tool execution — run inside a named
+   subagent — that any reviewer can re-run against the same evidence.
 
-`finding-trace.json` carries this resolved chain for all 25 findings; `EV-dc01-00001` is one of the 66
+Note that this chain crosses an **agent boundary**: the finding was authored by the orchestrator from the
+Analyze subagent's report, but the evidence behind it was produced by a *Parse* subagent's MFTECmd run.
+`finding-trace.json` carries the resolved chain for all 22 findings; `EV-dc01-00009` is one of the 70
 citations that resolve at 100% coverage.
 
 ## Regenerating the logs
 
-The extractor is read-only and deterministic. After re-running your case, regenerate everything with:
+The extractor is read-only and deterministic. After re-running a case, regenerate everything with:
 
 ```bash
 # 1. Extract the structured logs from the case's transcripts + findings/evidence registries
-python3 tooling/extract_agent_logs.py --case-id <CASE_ID>
+python3 tooling/extract_agent_logs.py --case-id CLIENT-IR-2026-008
 #   options: --case-dir /cases/<CASE_ID>  --projects-dir ~/.claude/projects  --out logs/<CASE_ID>
 
 # 2. Re-render this document to HTML (house style, no dependencies)
